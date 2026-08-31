@@ -251,6 +251,12 @@ impl DetectionCache {
         self.decoded
     }
 
+    /// Whether this timestamp's codes are already held, so `codes_for` would
+    /// answer without reading the frame.
+    pub fn holds(&self, pts: i64) -> bool {
+        self.entries.iter().any(|(seen, _)| *seen == pts)
+    }
+
     pub fn codes_for(&mut self, pts: i64, frame: &[u8], width: usize, height: usize) -> &[Found] {
         let at = match self.entries.iter().position(|(seen, _)| *seen == pts) {
             Some(at) => at,

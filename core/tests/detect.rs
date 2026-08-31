@@ -3,7 +3,7 @@
 // No binary fixture, and the round trip is what proves the decoder runs.
 
 use qrcode::{Color, EcLevel, QrCode};
-use rsqr_core::{detect_codes, mosaic_box, DetectionCache, CHANNELS};
+use rsqr_core::{detect_codes, mosaic_box, DetectionCache, Instance, WindowFrame, CHANNELS};
 
 const SCALE: usize = 6;
 const QUIET: usize = 4;
@@ -143,6 +143,30 @@ fn a_frame_is_decoded_once_per_timestamp_however_often_it_is_handed_in() {
     assert_eq!(cache.decoded(), 1);
     let texts: Vec<&str> = first.iter().map(|one| one.text.as_str()).collect();
     assert_eq!(texts, vec!["ffrwd"]);
+}
+
+#[test]
+fn a_window_read_fetches_only_the_timestamps_not_yet_decoded() {
+    let code = render("ffrwd", SCALE);
+    let mut instance = Instance::new("test");
+    instance
+        .open(code.width as u32, code.height as u32, "rgba", (1, 30), "")
+        .expect("opens");
+    // The first call meets pts 0 by the eager path.
+    instance.read(&[WindowFrame {
+        pts: 0,
+        frame: &code.rgba,
+    }]);
+    // The next window holds pts 0 and 1; only pts 1 is fetched.
+    let mut fetched: Vec<usize> = Vec::new();
+    let seen = instance.read_fetching(&[0, 1], |i| {
+        fetched.push(i);
+        code.rgba.clone()
+    });
+    assert_eq!(fetched, vec![1]);
+    // Both frames still count: the cached one and the fetched one agree.
+    assert_eq!(seen.boxes.len(), 1);
+    assert_eq!(seen.sightings.get("ffrwd"), Some(1.0 / 30.0));
 }
 
 #[test]

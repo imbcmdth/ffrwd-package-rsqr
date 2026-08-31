@@ -1,7 +1,10 @@
 //! `scan`: the picture untouched, every QR code beside it as a cue row.
 
+// The 0.10.0 world, checked in beside the crate: this module reads one frame
+// per call and gains nothing from the borrowed window, while the installed
+// `ffrwd/wasm` package carries only the version the manifest names.
 wit_bindgen::generate!({
-    path: "wit",
+    path: "wit-0.10.0",
     world: "window-module",
 });
 

@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use serde_json::Value;
 
-use crate::detect::{BoxRect, CodeRuns, DetectionCache, Sightings};
+use crate::detect::{BoxRect, CodeRuns, DetectionCache, Found, Sightings};
 
 pub const PIXEL_FORMAT: &str = "rgba";
 
@@ -123,17 +123,48 @@ impl Instance {
         let mut boxes: Vec<BoxRect> = Vec::new();
         for input in window {
             let time = self.seconds(input.pts);
-            for code in self
+            let codes = self
                 .cache
-                .codes_for(input.pts, input.frame, self.width, self.height)
-            {
-                sightings.note(&code.text, time);
-                if !boxes.contains(&code.bbox) {
-                    boxes.push(code.bbox);
-                }
-            }
+                .codes_for(input.pts, input.frame, self.width, self.height);
+            absorb(&mut sightings, &mut boxes, codes, time);
         }
         Windowed { sightings, boxes }
+    }
+
+    /// One window read over frames fetched on demand: `pts` is every
+    /// timestamp of the window, oldest first, and `fetch` copies index `i`'s
+    /// bytes in. A timestamp met before is answered out of the cache and its
+    /// bytes are never asked for.
+    pub fn read_fetching(
+        &mut self,
+        pts: &[i64],
+        mut fetch: impl FnMut(usize) -> Vec<u8>,
+    ) -> Windowed {
+        let mut sightings = Sightings::new();
+        let mut boxes: Vec<BoxRect> = Vec::new();
+        for (i, &stamp) in pts.iter().enumerate() {
+            let time = self.seconds(stamp);
+            // A held timestamp never reaches the decoder, so the empty slice
+            // stands in for bytes that were never copied.
+            let bytes = if self.cache.holds(stamp) {
+                Vec::new()
+            } else {
+                fetch(i)
+            };
+            let codes = self.cache.codes_for(stamp, &bytes, self.width, self.height);
+            absorb(&mut sightings, &mut boxes, codes, time);
+        }
+        Windowed { sightings, boxes }
+    }
+}
+
+/// Folds one payload's codes into a window's accumulators.
+fn absorb(sightings: &mut Sightings, boxes: &mut Vec<BoxRect>, codes: &[Found], time: f64) {
+    for code in codes {
+        sightings.note(&code.text, time);
+        if !boxes.contains(&code.bbox) {
+            boxes.push(code.bbox);
+        }
     }
 }
 

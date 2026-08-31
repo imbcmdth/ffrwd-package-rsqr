@@ -8,11 +8,9 @@ wit_bindgen::generate!({
 use std::cell::RefCell;
 
 use exports::ffrwd::av::window_filter::{
-    Format, FramePayload, Guest, InFrame, Meta, OutFrame, Processed, StreamInfo, WindowMeta,
+    Format, FramePayload, Guest, InWindow, Meta, OutFrame, Processed, StreamInfo, WindowMeta,
 };
-use rsqr_core::{
-    heads, mosaic_box, Instance, WindowFrame, PARAMS_SCHEMA, PIXEL_FORMAT, STRIDE, WINDOW,
-};
+use rsqr_core::{heads, mosaic_box, Instance, PARAMS_SCHEMA, PIXEL_FORMAT, STRIDE, WINDOW};
 
 const NAME: &str = "mosaic_codes";
 const VERSION: &str = "0.1.0";
@@ -69,30 +67,31 @@ impl Guest for MosaicCodes {
         INSTANCE.with_borrow(|instance| instance.read_params(&params))
     }
 
-    fn process(frames: Vec<InFrame>, _trailing: Vec<String>, last: bool) -> Processed {
+    fn process(window: &InWindow, _trailing: Vec<String>, last: bool) -> Processed {
         INSTANCE.with_borrow_mut(|instance| {
+            let len = window.len() as usize;
             let mut out: Vec<OutFrame> = Vec::new();
-            for head in heads(frames.len(), last) {
-                let window: Vec<WindowFrame> = frames[head..]
-                    .iter()
-                    .map(|input| WindowFrame {
-                        pts: input.pts,
-                        frame: &input.frame,
-                    })
-                    .collect();
-                let boxes = instance.read(&window).boxes;
+            for head in heads(len, last) {
+                let pts: Vec<i64> = (head..len).map(|i| window.pts(i as u32)).collect();
+                // Only timestamps this instance has not decoded yet have
+                // their bytes copied in; the rest answer out of the cache.
+                let boxes = instance
+                    .read_fetching(&pts, |i| window.fetch((head + i) as u32))
+                    .boxes;
                 let payload = if boxes.is_empty() {
                     // Nothing to redact, so the frame passes through uncopied.
                     FramePayload::Same
                 } else {
-                    let mut redacted = frames[head].frame.clone();
+                    // Fetched to be written on: `fetch` hands over the copy
+                    // the redaction happens in.
+                    let mut redacted = window.fetch(head as u32);
                     for bbox in &boxes {
                         mosaic_box(&mut redacted, instance.width(), instance.height(), bbox);
                     }
                     FramePayload::New(redacted)
                 };
                 out.push(OutFrame {
-                    pts: frames[head].pts,
+                    pts: pts[0],
                     frame: payload,
                     rows: vec![],
                 });
