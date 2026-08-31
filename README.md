@@ -76,19 +76,40 @@ before it, and a gap the window can span heals from both sides.
 
 This costs nothing in latency. The frame the module speaks for is the
 oldest one it holds, not the newest, so the look-ahead is the host's
-buffer rather than a delay in the output. Each frame is still decoded
-exactly once — the fifteen-fold overlap hits a cache keyed by
-timestamp.
+buffer rather than a delay in the output.
 
-For `scan` it means a cue starts a window before the code was first
-read and ends at its last real sighting: one cue per code per
-appearance, not one row per frame. For `mosaic_codes` it means a code
-is covered from before the decoder first managed to read it.
+The two exports reach back differently, because they need different
+things from those fifteen frames.
 
-The window is fixed at fifteen frames. It is not a parameter, and
+`mosaic_codes` needs their **pixels** — it redacts a frame because of a
+code found later in the window — so the host hands it fifteen frames a
+call and it reads them all. Each is still decoded exactly once; the
+fifteen-fold overlap hits a cache keyed by timestamp.
+
+`scan` needs only their **timestamps**. A cue carries its own timing,
+so reaching back is arithmetic: the module keeps the times of the
+frames as they pass and dates a sighting fifteen frames earlier. It
+therefore asks for one frame a call instead of fifteen, which is
+**about a quarter off its runtime** at 640×480 — the copying was that
+large a share of it. (Two frames, strictly: a window of one leaves the
+host's final call carrying nothing, and the closing cues need a frame
+to ride out on.)
+
+The reach is fixed at fifteen frames. It is not a parameter, and
 cannot be: the host settles a module's window from `describe()` before
 it opens the call, so a parameter could only ever narrow behavior
 inside a window already sized.
+
+## When a cue comes out
+
+`scan`'s cues are unchanged by any of the above — same text, same
+`start_t`, same `end_t`, and the WebVTT track it mints is byte for
+byte what it always was. What moved is which frame carries the row: a
+run that ends mid-stream is only *known* to have ended once fifteen
+more frames have passed without it, so in a `.ndjson` destination that
+row's `pts` and `time` — the stamp of its carrier frame, not of the
+cue — are fifteen frames later than before. Read a cue's own
+`start_t`/`end_t`; they are the payload.
 
 ## The comparison
 

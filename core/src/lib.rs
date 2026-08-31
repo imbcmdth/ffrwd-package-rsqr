@@ -8,6 +8,6 @@ mod instance;
 
 pub use detect::{
     block_size, bounding_box, detect_codes, greyscale, mosaic_box, BoxRect, CodeRuns, Cue,
-    DetectionCache, Found, Sightings, ASSUMED_INTERVAL, CHANNELS, STRIDE, WINDOW,
+    DetectionCache, Found, Sightings, ASSUMED_INTERVAL, CHANNELS, SCAN_WINDOW, STRIDE, WINDOW,
 };
 pub use instance::{heads, Instance, WindowFrame, Windowed, PARAMS_SCHEMA, PIXEL_FORMAT};

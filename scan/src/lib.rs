@@ -10,7 +10,9 @@ use std::cell::RefCell;
 use exports::ffrwd::av::window_filter::{
     Format, FramePayload, Guest, InFrame, Meta, OutFrame, Processed, StreamInfo, WindowMeta,
 };
-use rsqr_core::{heads, Cue, Instance, WindowFrame, PARAMS_SCHEMA, PIXEL_FORMAT, STRIDE, WINDOW};
+use rsqr_core::{
+    heads, Cue, Instance, WindowFrame, PARAMS_SCHEMA, PIXEL_FORMAT, SCAN_WINDOW, STRIDE,
+};
 
 const NAME: &str = "scan";
 const VERSION: &str = "0.1.0";
@@ -39,10 +41,10 @@ impl Guest for Scan {
                 // name is not declared here yet.
                 rows_language: vec![],
             },
-            window: WINDOW,
+            window: SCAN_WINDOW,
             stride: STRIDE,
-            // A run outlives the window it started in, so a call answers out
-            // of what earlier calls left behind.
+            // A run outlives the call it started in, so a call answers out of
+            // what earlier calls left behind.
             pure: false,
             // One output per frame consumed, each at that frame's own pts.
             one_to_one: true,
@@ -75,13 +77,13 @@ impl Guest for Scan {
         INSTANCE.with_borrow_mut(|instance| {
             let mut out: Vec<OutFrame> = Vec::new();
             for head in heads(frames.len(), last) {
-                let window: Vec<WindowFrame> = frames[head..]
-                    .iter()
-                    .map(|input| WindowFrame {
-                        pts: input.pts,
-                        frame: &input.frame,
-                    })
-                    .collect();
+                // Only the frame the call speaks for is read. The frames a
+                // sighting is carried back over are reached by their
+                // timestamps, so their pixels are never asked for.
+                let window = [WindowFrame {
+                    pts: frames[head].pts,
+                    frame: &frames[head].frame,
+                }];
                 let seen = instance.read(&window);
                 let time = instance.seconds(frames[head].pts);
                 let cues = instance.runs.credit(time, &seen.sightings);

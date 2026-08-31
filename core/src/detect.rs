@@ -7,13 +7,21 @@ use std::collections::VecDeque;
 /// and only the luma the decoder wants is derived from it.
 pub const CHANNELS: usize = 4;
 
-/// How many frames one call sees, and how many it consumes. The host reads
-/// these off `describe` BEFORE `init`, and never asks again - so this is the
-/// module's own constant and cannot be a parameter of the SQL call. 15 frames
-/// is half a second at 30fps: long enough to carry a code back over the frames
-/// the decoder missed it in, short enough that the look-ahead stays cheap.
+/// How many frames a code is carried back over, and how many `mosaic_codes`
+/// therefore sees in one call. The host reads the window off `describe` BEFORE
+/// `init`, and never asks again - so this is the module's own constant and
+/// cannot be a parameter of the SQL call. 15 frames is half a second at 30fps:
+/// long enough to carry a code back over the frames the decoder missed it in,
+/// short enough that the look-ahead stays cheap.
 pub const WINDOW: u32 = 15;
 pub const STRIDE: u32 = 1;
+
+/// How many frames `scan` sees in one call. It reads only the first of them:
+/// the frames a sighting is carried back over are reached by the timestamps it
+/// kept as they passed, never by their pixels. Two rather than one because a
+/// window of one comes out even, and the final call would then carry no frame
+/// for the closing cues to ride.
+pub const SCAN_WINDOW: u32 = 2;
 
 /// How many times one frame is searched. Each pass paints out what it found
 /// before the next looks, so the cost is one pass per round of codes plus one
@@ -319,20 +327,33 @@ impl FromIterator<(String, f64)> for Sightings {
 struct Run {
     start_time: f64,
     last_time: f64,
+    /// Frames credited since the last one this code was seen in.
+    missed: u32,
+    /// The interval in force at the first of those - the frame the run ends
+    /// on, which is not the frame its cue comes out on.
+    closing_interval: f64,
 }
 
-/// The runs a code makes across the windows it is credited to.
+/// The runs a code makes across the frames it is credited to.
 ///
-/// A window credits the frame it heads with every code found anywhere in it,
-/// so a code the decoder only catches late is carried back over the frames
-/// before it. A run is the stretch of frames credited with one payload without
-/// a break, which heals any gap the window can span, and it closes into one
-/// cue: the first frame credited, through the last frame the code was really
-/// seen in.
+/// A code is credited back over the WINDOW frames before the one it was read
+/// in, so a code the decoder only catches late still covers the frames before
+/// it and the flicker a per-frame decoder produces closes up. That reach back
+/// is arithmetic: the timestamps of those frames are held as they pass, and
+/// their pixels are never asked for.
+///
+/// A run is the stretch of frames credited with one payload without a break,
+/// which heals any gap the window can span, and it closes into one cue: the
+/// first frame credited, through the last frame the code was really seen in.
+/// A run ENDS on the frame after its last sighting; nothing ahead being known,
+/// that is only certain a window later, which is when its cue comes out.
 pub struct CodeRuns {
     runs: Vec<(String, Run)>,
     interval: f64,
     previous_time: Option<f64>,
+    /// The times of the last WINDOW frames, this one last. The first of them
+    /// is where a run starting now reaches back to.
+    recent: VecDeque<f64>,
 }
 
 impl Default for CodeRuns {
@@ -347,10 +368,12 @@ impl CodeRuns {
             runs: Vec::new(),
             interval: ASSUMED_INTERVAL,
             previous_time: None,
+            recent: VecDeque::new(),
         }
     }
 
-    /// One frame's credit. Returns the cues of the runs that ended before it.
+    /// One frame's credit. Returns the cues of the runs now known to have
+    /// ended - each a window ago, since that is how long it takes to be sure.
     pub fn credit(&mut self, time: f64, sightings: &Sightings) -> Vec<Cue> {
         if let Some(previous) = self.previous_time {
             if time > previous {
@@ -359,14 +382,25 @@ impl CodeRuns {
         }
         self.previous_time = Some(time);
 
+        self.recent.push_back(time);
+        while self.recent.len() > WINDOW as usize {
+            self.recent.pop_front();
+        }
+        let reaches_back_to = *self.recent.front().expect("this frame is in it");
+
         for (text, last_seen) in sightings.iter() {
             match self.runs.iter_mut().find(|(held, _)| held == text) {
-                Some((_, run)) => run.last_time = run.last_time.max(last_seen),
+                Some((_, run)) => {
+                    run.last_time = run.last_time.max(last_seen);
+                    run.missed = 0;
+                }
                 None => self.runs.push((
                     text.to_string(),
                     Run {
-                        start_time: time,
+                        start_time: reaches_back_to,
                         last_time: last_seen,
+                        missed: 0,
+                        closing_interval: self.interval,
                     },
                 )),
             }
@@ -374,36 +408,56 @@ impl CodeRuns {
 
         let interval = self.interval;
         let mut cues = Vec::new();
-        self.runs.retain(|(text, run)| {
+        self.runs.retain_mut(|(text, run)| {
             if sightings.get(text).is_some() {
                 return true;
             }
-            cues.push(cue(text, run, interval));
+            if run.missed == 0 {
+                run.closing_interval = interval;
+            }
+            run.missed += 1;
+            if run.missed < WINDOW {
+                return true;
+            }
+            cues.push(cue(text, run));
             false
         });
         cues
     }
 
-    /// The cues of every run still open, which then close.
+    /// The cues of every run the stream ended before, which then close. A run
+    /// the window had not finished missing ended before the stream did, so it
+    /// comes out ahead of the ones still on screen at the end.
     pub fn flush(&mut self) -> Vec<Cue> {
         let interval = self.interval;
-        let cues = self
-            .runs
-            .iter()
-            .map(|(text, run)| cue(text, run, interval))
-            .collect();
-        self.runs.clear();
-        cues
+        let mut held: Vec<(String, Run)> = std::mem::take(&mut self.runs);
+        for (_, run) in &mut held {
+            if run.missed == 0 {
+                run.closing_interval = interval;
+            }
+        }
+        held.sort_by(|(_, a), (_, b)| ends_at(a).total_cmp(&ends_at(b)));
+        held.iter().map(|(text, run)| cue(text, run)).collect()
+    }
+}
+
+// When a run ended, for the order the cues come out in. A run still on screen
+// ends with the stream, after every run that ran out before it.
+fn ends_at(run: &Run) -> f64 {
+    if run.missed == 0 {
+        f64::INFINITY
+    } else {
+        run.last_time
     }
 }
 
 // A run as one cue. A code caught in a single frame would span nothing, so
 // such a cue is given one frame's width.
-fn cue(text: &str, run: &Run, interval: f64) -> Cue {
+fn cue(text: &str, run: &Run) -> Cue {
     let end = if run.last_time > run.start_time {
         run.last_time
     } else {
-        run.start_time + interval
+        run.start_time + run.closing_interval
     };
     Cue {
         text: text.to_string(),

@@ -1,8 +1,8 @@
-// The retroactive window, driven the way the host drives it: no pixels, no
+// The retroactive reach, driven the way the host drives it: no pixels, no
 // wasm. `heads` says which frames a call speaks for; `CodeRuns` turns the
 // credit each of them gets into cues.
 
-use rsqr_core::{heads, CodeRuns, Cue, Sightings, WINDOW};
+use rsqr_core::{heads, CodeRuns, Cue, Sightings, SCAN_WINDOW, WINDOW};
 
 const FPS: f64 = 30.0;
 
@@ -18,95 +18,100 @@ fn cue(text: &str, start: usize, end: usize) -> Cue {
     }
 }
 
-/// One frame of a driven stream: its index, and the payloads it was really
-/// decoded in.
-struct Frame {
-    pts: usize,
-    texts: Vec<&'static str>,
-}
-
-/// One call: the window it was handed, and whether it is the final one.
+/// One call: the frames it was handed, and whether it is the final one.
 struct Call {
-    from: usize,
-    to: usize,
+    frames: Vec<usize>,
     last: bool,
 }
 
-/// What the whole run produced: the cues, and which frame was credited with
-/// what.
-struct Driven {
-    cues: Vec<Cue>,
-    credited: Vec<(usize, Vec<String>)>,
-}
-
-/// The whole stream through the module, the way the sidecar cuts it: a call
-/// per frame carrying that frame and the WINDOW - 1 after it, then a final
-/// call carrying whatever the last stride left over. `seen(k)` is the payloads
-/// frame k was really decoded in.
-fn drive(count: usize, seen: impl Fn(usize) -> Vec<&'static str>) -> Driven {
-    let frames: Vec<Frame> = (0..count)
-        .map(|pts| Frame {
-            pts,
-            texts: seen(pts),
-        })
-        .collect();
-    let size = WINDOW as usize;
-
-    let mut calls: Vec<Call> = Vec::new();
-    let mut consumed = 0;
-    while consumed + size <= count {
-        calls.push(Call {
-            from: consumed,
-            to: consumed + size,
-            last: false,
-        });
-        consumed += 1;
+/// The calls a `window`-wide, stride-1 cut makes over `count` frames, the way
+/// the host cuts them: a call as soon as the window fills, then a final call
+/// over whatever the last stride left over.
+fn calls(count: usize, window: usize) -> Vec<Call> {
+    let mut cut = Vec::new();
+    let mut buffered: Vec<usize> = Vec::new();
+    for frame in 0..count {
+        buffered.push(frame);
+        if buffered.len() == window {
+            cut.push(Call {
+                frames: buffered.clone(),
+                last: false,
+            });
+            buffered.remove(0);
+        }
     }
-    calls.push(Call {
-        from: consumed,
-        to: count,
+    cut.push(Call {
+        frames: buffered,
         last: true,
     });
+    cut
+}
 
+/// Which frame each call of that cut speaks for, in the order they are spoken
+/// for.
+fn spoken_for(count: usize, window: usize) -> Vec<usize> {
+    calls(count, window)
+        .iter()
+        .flat_map(|call| heads(call.frames.len(), call.last).map(|head| call.frames[head]))
+        .collect()
+}
+
+/// What the whole run produced: the cues, and the frame the call that emitted
+/// each one spoke for - `None` for the ones the final flush produced.
+struct Driven {
+    cues: Vec<Cue>,
+    emitted: Vec<Option<usize>>,
+}
+
+/// The whole stream through `scan`: one frame read per call, in the order the
+/// host hands them over, then the flush that closes whatever is still open.
+/// `seen(k)` is the payloads frame k was really decoded in.
+fn drive(count: usize, seen: impl Fn(usize) -> Vec<&'static str>) -> Driven {
     let mut runs = CodeRuns::new();
     let mut driven = Driven {
         cues: Vec::new(),
-        credited: Vec::new(),
+        emitted: Vec::new(),
     };
-    for call in calls {
-        let window = &frames[call.from..call.to];
-        for head in heads(window.len(), call.last) {
-            let mut sightings = Sightings::new();
-            for frame in &window[head..] {
-                for text in &frame.texts {
-                    sightings.note(text, at(frame.pts));
-                }
-            }
-            driven.credited.push((
-                window[head].pts,
-                sightings.iter().map(|(text, _)| text.to_string()).collect(),
-            ));
-            driven
-                .cues
-                .extend(runs.credit(at(window[head].pts), &sightings));
+    for frame in spoken_for(count, SCAN_WINDOW as usize) {
+        let mut sightings = Sightings::new();
+        for text in seen(frame) {
+            sightings.note(text, at(frame));
+        }
+        for one in runs.credit(at(frame), &sightings) {
+            driven.cues.push(one);
+            driven.emitted.push(Some(frame));
         }
     }
-    driven.cues.extend(runs.flush());
+    for one in runs.flush() {
+        driven.cues.push(one);
+        driven.emitted.push(None);
+    }
     driven
 }
 
 #[test]
 fn every_frame_is_spoken_for_exactly_once_in_order() {
-    let driven = drive(40, |_| vec![]);
-    let spoken: Vec<usize> = driven.credited.iter().map(|(frame, _)| *frame).collect();
-    assert_eq!(spoken, (0..40).collect::<Vec<usize>>());
+    let wanted: Vec<usize> = (0..40).collect();
+    assert_eq!(spoken_for(40, WINDOW as usize), wanted);
+    assert_eq!(spoken_for(40, SCAN_WINDOW as usize), wanted);
 }
 
 #[test]
 fn a_stream_shorter_than_the_window_is_all_one_final_call() {
-    let driven = drive(4, |_| vec![]);
-    let spoken: Vec<usize> = driven.credited.iter().map(|(frame, _)| *frame).collect();
-    assert_eq!(spoken, vec![0, 1, 2, 3]);
+    let calls = calls(4, WINDOW as usize);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].last);
+    assert_eq!(spoken_for(4, WINDOW as usize), vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn the_scan_window_leaves_the_last_frame_for_the_final_call() {
+    // A window of one would come out even, and the closing cues would have no
+    // frame left to ride out on.
+    let cut = calls(40, SCAN_WINDOW as usize);
+    let last = cut.last().expect("a final call is always made");
+    assert!(last.last);
+    assert_eq!(last.frames, vec![39]);
 }
 
 #[test]
@@ -128,17 +133,17 @@ fn the_final_call_speaks_for_every_frame_left_over_over_shortening_windows() {
 }
 
 #[test]
-fn a_sighting_is_carried_back_over_every_frame_of_its_window() {
+fn a_run_is_only_known_to_have_ended_a_window_after_its_last_sighting() {
+    // Nothing ahead of the frame in hand is read, so a run that ends at frame
+    // 13 is only certainly over once frame 12 + WINDOW has gone by unseen.
     let driven = drive(40, |k| if k == 12 { vec!["a"] } else { vec![] });
-    // Frame 12 is the last frame of the window headed by frame 0 through the
-    // window headed by frame 12, so all of them are credited with it.
-    let carrying: Vec<usize> = driven
-        .credited
-        .iter()
-        .filter(|(_, texts)| !texts.is_empty())
-        .map(|(frame, _)| *frame)
-        .collect();
-    assert_eq!(carrying, (0..=12).collect::<Vec<usize>>());
+    assert_eq!(driven.emitted, vec![Some(12 + WINDOW as usize)]);
+}
+
+#[test]
+fn a_run_that_outlives_the_stream_is_closed_by_the_flush() {
+    let driven = drive(40, |k| if k >= 30 { vec!["a"] } else { vec![] });
+    assert_eq!(driven.emitted, vec![None]);
 }
 
 #[test]
@@ -224,6 +229,22 @@ fn a_code_still_on_screen_when_the_stream_ends_is_closed_by_the_flush() {
         driven.cues,
         vec![cue("a", 20 - WINDOW as usize + 1, count - 1)]
     );
+}
+
+#[test]
+fn cues_the_stream_ends_on_come_out_in_the_order_their_runs_ended() {
+    // "late" is on screen to the end; "early" leaves a few frames before it,
+    // too few for the window to finish missing. Both are closed by the same
+    // flush, and the one that ended first comes out first however they were
+    // met.
+    let driven = drive(40, |k| match k {
+        21..=34 => vec!["late", "early"],
+        20..=38 => vec!["late"],
+        _ => vec![],
+    });
+    let order: Vec<&str> = driven.cues.iter().map(|one| one.text.as_str()).collect();
+    assert_eq!(order, vec!["early", "late"]);
+    assert_eq!(driven.emitted, vec![None, None]);
 }
 
 #[test]
