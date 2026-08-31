@@ -1,0 +1,12 @@
+[package]
+name = "mosaic-codes"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mosaic_codes"
+crate-type = ["cdylib"]
+
+[dependencies]
+rsqr-core = { path = "../core" }
+wit-bindgen = "0.57.1"

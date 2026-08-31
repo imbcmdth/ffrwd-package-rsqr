@@ -1,0 +1,29 @@
+{
+  "name": "ffrwd/rsqr",
+  "version": "0.1.0",
+  "description": "QR codes found in video and turned into a caption track or mosaiced out of the picture, hosted in wasm - and written in Rust, rqrr compiled to a wasip2 component.",
+  "license": "Apache-2.0",
+  "capabilities": [],
+  "dependencies": {
+    "ffrwd/wasm": "0.10.0"
+  },
+  "keywords": [
+    "qr",
+    "qrcode",
+    "barcode",
+    "detection",
+    "captions",
+    "cues",
+    "mosaic",
+    "privacy",
+    "rust"
+  ],
+  "lib": {
+    "scan": "src/scan.sql",
+    "mosaic_codes": "src/mosaic_codes.sql"
+  },
+  "bin": {
+    "codes": "recipes/codes.sql",
+    "redact": "recipes/redact.sql"
+  }
+}

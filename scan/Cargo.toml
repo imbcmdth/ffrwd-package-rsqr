@@ -1,0 +1,12 @@
+[package]
+name = "scan"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "scan"
+crate-type = ["cdylib"]
+
+[dependencies]
+rsqr-core = { path = "../core" }
+wit-bindgen = "0.57.1"

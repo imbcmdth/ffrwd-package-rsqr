@@ -1,0 +1,17 @@
+[package]
+name = "rsqr-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rsqr_core"
+
+[dependencies]
+# The quirc port, pure Rust. The `img` default feature pulls in the `image`
+# crate for loading files, which a module handed raw pixels never needs.
+rqrr = { version = "0.10.1", default-features = false }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# Codes are made in the tests rather than shipped as fixtures.
+qrcode = { version = "0.14.1", default-features = false }

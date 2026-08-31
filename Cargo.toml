@@ -1,0 +1,15 @@
+[workspace]
+# The wasm modules this package ships. They build into
+# target/wasm32-wasip2/release/, which is where the package's lib SQL names
+# them. `core` is the detection both compile in; it ships nothing of its own.
+members = [
+    "core",
+    "scan",
+    "mosaic-codes",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

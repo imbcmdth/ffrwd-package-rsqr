@@ -1,0 +1,10 @@
+# Build output, including whatever `cargo test` leaves behind. The two files
+# the lib SQL names are pulled back in by the manifest's closure; the rest of
+# the directory stays out of the archive.
+target/
+
+# The wit each crate's build.rs copies in, which is the sidecar's own.
+wit/
+
+# Local development state, not package content.
+ffrwd.lock
