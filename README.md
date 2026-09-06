@@ -62,7 +62,7 @@ COPY (
 - `redact` — the clip with its QR codes mosaiced out.
 
 ```
-ffrwd ffrwd.rsqr.codes -v source=shelf.mp4 -v dest=labelled.mkv
+ffrwd run ffrwd/rsqr:codes -v source=shelf.mp4 -v dest=labelled.mkv
 ```
 
 ## Detection is retroactive
