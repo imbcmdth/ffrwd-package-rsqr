@@ -3,7 +3,7 @@
 QR codes in video: read them into a caption track, or mosaic them out
 of the picture.
 
-Requires ffrwd 0.29.
+Requires ffrwd 0.29, whose `ffrwd/wasm` is 0.19.1.
 
 This is the Rust twin of [`ffrwd/jsqr`](https://github.com/imbcmdth/ffrwd-package-jsqr),
 built to the same specification so the two can be timed against each
