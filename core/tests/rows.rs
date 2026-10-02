@@ -6,6 +6,7 @@ use rsqr_core::{payloads, BoxRect, Found, Sighting};
 fn sighting(start_t: f64, text: &str) -> String {
     Sighting {
         start_t,
+        id: 3,
         text: text.to_string(),
     }
     .row()
@@ -28,15 +29,21 @@ fn found(texts: &[&str]) -> Vec<Found> {
 
 #[test]
 fn a_row_writes_a_whole_second_without_a_fraction() {
-    assert_eq!(sighting(1.0, "ffrwd"), r#"{"start_t":1,"text":"ffrwd"}"#);
-    assert_eq!(sighting(0.0, "ffrwd"), r#"{"start_t":0,"text":"ffrwd"}"#);
+    assert_eq!(
+        sighting(1.0, "ffrwd"),
+        r#"{"start_t":1,"id":3,"text":"ffrwd"}"#
+    );
+    assert_eq!(
+        sighting(0.0, "ffrwd"),
+        r#"{"start_t":0,"id":3,"text":"ffrwd"}"#
+    );
 }
 
 #[test]
 fn a_row_keeps_every_digit_of_a_time_that_needs_them() {
     assert_eq!(
         sighting(1.9666666666666663, "a"),
-        r#"{"start_t":1.9666666666666663,"text":"a"}"#
+        r#"{"start_t":1.9666666666666663,"id":3,"text":"a"}"#
     );
 }
 
@@ -44,7 +51,7 @@ fn a_row_keeps_every_digit_of_a_time_that_needs_them() {
 fn a_payload_with_json_in_it_is_escaped_into_the_row() {
     assert_eq!(
         sighting(0.0, "he said \"hi\"\n"),
-        r#"{"start_t":0,"text":"he said \"hi\"\n"}"#
+        r#"{"start_t":0,"id":3,"text":"he said \"hi\"\n"}"#
     );
 }
 

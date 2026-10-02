@@ -41,11 +41,13 @@ pub struct Found {
     pub bbox: BoxRect,
 }
 
-/// One code in view on one frame, as the row `scan` emits: its payload, and
-/// the time the sighting it belongs to began, which names that sighting.
+/// One code in view on one frame, as the row `scan` emits: the time the
+/// sighting it belongs to began, which names that sighting, how many
+/// sightings began before it, and its payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sighting {
     pub start_t: f64,
+    pub id: u64,
     pub text: String,
 }
 
@@ -54,8 +56,9 @@ impl Sighting {
     /// `ffrwd/jsqr` writes the same rows.
     pub fn row(&self) -> String {
         format!(
-            r#"{{"start_t":{},"text":{}}}"#,
+            r#"{{"start_t":{},"id":{},"text":{}}}"#,
             time(self.start_t),
+            self.id,
             serde_json::to_string(&self.text).expect("a string is always JSON")
         )
     }

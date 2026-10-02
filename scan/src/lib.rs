@@ -4,7 +4,7 @@
 use ffrwd_node::{Bound, Init, Input, NoParams, Node, Out, Output, Result, Shape, Spans, Tick};
 use rsqr_core::{detect_codes, payloads, Sighting, GAP, PIXEL_FORMAT};
 
-const ROW_SCHEMA: &str = r#"{"type":"object","properties":{"start_t":{"type":"number"},"text":{"type":"string"}},"required":["start_t","text"],"additionalProperties":false}"#;
+const ROW_SCHEMA: &str = r#"{"type":"object","properties":{"start_t":{"type":"number"},"id":{"type":"integer"},"text":{"type":"string"}},"required":["start_t","id","text"],"additionalProperties":false}"#;
 
 struct Scan {
     v: u32,
@@ -42,8 +42,10 @@ impl Node for Scan {
         self.sightings.tick(tick.time_base().seconds(frame.pts));
         let pixels = tick.fetch(self.v, frame.index);
         for text in payloads(&detect_codes(&pixels, self.width, self.height)) {
+            let sighting = self.sightings.see(text.to_owned());
             let row = Sighting {
-                start_t: self.sightings.see(text.to_owned()).start_t,
+                start_t: sighting.start_t,
+                id: sighting.number,
                 text: text.to_owned(),
             };
             out.message("codes", frame.pts, row.row().into_bytes())?;
@@ -123,9 +125,10 @@ mod tests {
         rows
     }
 
-    fn row(start: i64, text: &str) -> String {
+    fn row(start: i64, id: u64, text: &str) -> String {
         Sighting {
             start_t: start as f64 / FPS as f64,
+            id,
             text: text.to_owned(),
         }
         .row()
@@ -152,19 +155,25 @@ mod tests {
         let rows = run(8, |k| if (2..6).contains(&k) { vec![A] } else { vec![] });
         let frames: Vec<i64> = rows.iter().map(|(pts, _)| *pts).collect();
         assert_eq!(frames, vec![2, 3, 4, 5]);
-        assert!(rows.iter().all(|(_, text)| *text == row(2, "ffrwd")));
+        assert!(rows.iter().all(|(_, text)| *text == row(2, 0, "ffrwd")));
     }
 
     #[test]
     fn a_gap_of_fourteen_frames_is_still_the_same_sighting() {
         let rows = run(40, |k| if k == 5 || k == 20 { vec![A] } else { vec![] });
-        assert_eq!(rows, vec![(5, row(5, "ffrwd")), (20, row(5, "ffrwd"))]);
+        assert_eq!(
+            rows,
+            vec![(5, row(5, 0, "ffrwd")), (20, row(5, 0, "ffrwd"))]
+        );
     }
 
     #[test]
     fn a_gap_of_fifteen_frames_starts_a_new_sighting() {
         let rows = run(40, |k| if k == 5 || k == 21 { vec![A] } else { vec![] });
-        assert_eq!(rows, vec![(5, row(5, "ffrwd")), (21, row(21, "ffrwd"))]);
+        assert_eq!(
+            rows,
+            vec![(5, row(5, 0, "ffrwd")), (21, row(21, 1, "ffrwd"))]
+        );
     }
 
     #[test]
@@ -177,11 +186,25 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (1, row(1, "https://want.video")),
-                (2, row(2, "ffrwd")),
-                (2, row(1, "https://want.video")),
-                (3, row(2, "ffrwd")),
-                (3, row(1, "https://want.video")),
+                (1, row(1, 0, "https://want.video")),
+                (2, row(2, 1, "ffrwd")),
+                (2, row(1, 0, "https://want.video")),
+                (3, row(2, 1, "ffrwd")),
+                (3, row(1, 0, "https://want.video")),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_codes_first_seen_together_are_told_apart_by_id() {
+        let rows = run(3, |k| if k >= 1 { vec![A, B] } else { vec![] });
+        assert_eq!(
+            rows,
+            vec![
+                (1, row(1, 0, "ffrwd")),
+                (1, row(1, 1, "https://want.video")),
+                (2, row(1, 0, "ffrwd")),
+                (2, row(1, 1, "https://want.video")),
             ]
         );
     }
@@ -189,7 +212,7 @@ mod tests {
     #[test]
     fn the_last_frame_writes_its_rows_like_any_other() {
         let rows = run(3, |k| if k == 2 { vec![A] } else { vec![] });
-        assert_eq!(rows, vec![(2, row(2, "ffrwd"))]);
+        assert_eq!(rows, vec![(2, row(2, 0, "ffrwd"))]);
     }
 
     #[test]

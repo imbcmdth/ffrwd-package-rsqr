@@ -22,12 +22,13 @@ ffrwd install ffrwd/rsqr
 
 ## Exports
 
-### `scan(v)` → `STRUCT(start_t number, text text)[]`
+### `scan(v)` → `STRUCT(start_t number, id number, text text)[]`
 
 A row per frame for each code in view: the decoded payload as `text`,
-and as `start_t` the time this sighting of the code began. Every row of
-one sighting carries the same `start_t`, which names the sighting, and
-each row leaves with the frame it describes.
+as `start_t` the time this sighting of the code began, and as `id` how
+many sightings began before it. Every row of one sighting carries the
+same `start_t` and `id`, which name the sighting, and each row leaves
+with the frame it describes.
 
 `ffrwd.merge_spans` turns the rows into one cue per sighting, from the
 frame the code was first read to the end of the last frame it was read
@@ -100,9 +101,9 @@ The fifteen frames are the module's own constant, not a parameter.
 picture by up to 30 seconds at the muxer, and a code on screen for
 longer than that is written as consecutive cues.
 
-Two codes first read on the same frame come out as one cue for now,
-carrying the payload that sorts last: the reducer names a sighting by
-its start alone. `scan`'s rows hold both.
+Two codes first read on the same frame come out as one cue, carrying
+the payload that sorts last, until the reducer names a sighting by its
+`id` as well as its start; `scan`'s rows already tell them apart.
 
 ## From 0.1
 
