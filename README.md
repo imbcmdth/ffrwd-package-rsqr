@@ -101,8 +101,8 @@ picture by up to 30 seconds at the muxer, and a code on screen for
 longer than that is written as consecutive cues.
 
 Two codes first read on the same frame come out as one cue for now,
-carrying the later payload: the reducer names a sighting by its start
-alone. `scan`'s rows hold both.
+carrying the payload that sorts last: the reducer names a sighting by
+its start alone. `scan`'s rows hold both.
 
 ## From 0.1
 
