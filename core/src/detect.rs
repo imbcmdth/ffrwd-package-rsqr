@@ -1,5 +1,5 @@
-// The QR lookup over rgba pixels, the mosaic that redacts a code, and the
-// runs that turn per-frame sightings into cues.
+// The QR lookup over rgba pixels, the mosaic that redacts a code, and the row
+// `scan` writes for each code it sees.
 
 use std::collections::VecDeque;
 
@@ -7,29 +7,23 @@ use std::collections::VecDeque;
 /// and only the luma the decoder wants is derived from it.
 pub const CHANNELS: usize = 4;
 
-/// How many frames a code is carried back over, and how many `mosaic_codes`
-/// therefore sees in one call. The host reads the window off `describe` BEFORE
-/// `init`, and never asks again - so this is the module's own constant and
-/// cannot be a parameter of the SQL call. 15 frames is half a second at 30fps:
-/// long enough to carry a code back over the frames the decoder missed it in,
-/// short enough that the look-ahead stays cheap.
+/// How many frames `mosaic_codes` sees in one call: a frame is redacted by
+/// every code found in it or in the 14 frames after it, so a code is covered
+/// from before the decoder first read it. 15 frames is half a second at
+/// 30fps: long enough to cover the frames the decoder missed a code in, short
+/// enough that the look-ahead stays cheap.
 pub const WINDOW: u32 = 15;
 pub const STRIDE: u32 = 1;
 
-/// How many frames `scan` sees in one call. It reads only the first of them:
-/// the frames a sighting is carried back over are reached by the timestamps it
-/// kept as they passed, never by their pixels. Two rather than one because a
-/// window of one comes out even, and the final call would then carry no frame
-/// for the closing cues to ride.
-pub const SCAN_WINDOW: u32 = 2;
+/// How many frames in a row a code may go unread and still be the same
+/// sighting to `scan`, which is the gap the window above heals for
+/// `mosaic_codes`: the two exports agree on what one appearance is.
+pub const GAP: u32 = WINDOW - 1;
 
 /// How many times one frame is searched. Each pass paints out what it found
 /// before the next looks, so the cost is one pass per round of codes plus one
 /// that fails.
 const MAX_PASSES_PER_FRAME: usize = 8;
-
-/// The frame interval assumed until two frames have arrived.
-pub const ASSUMED_INTERVAL: f64 = 1.0 / 30.0;
 
 /// A rectangle of the picture, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,22 +41,22 @@ pub struct Found {
     pub bbox: BoxRect,
 }
 
-/// One code's span on screen, as the row `scan` emits.
+/// One code in view on one frame, as the row `scan` emits: its payload, and
+/// the time the sighting it belongs to began, which names that sighting.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Cue {
-    pub text: String,
+pub struct Sighting {
     pub start_t: f64,
-    pub end_t: f64,
+    pub text: String,
 }
 
-impl Cue {
-    /// The NDJSON row this cue rides out on.
+impl Sighting {
+    /// The JSON row, byte for byte what `JSON.stringify` writes for it, so
+    /// `ffrwd/jsqr` writes the same rows.
     pub fn row(&self) -> String {
         format!(
-            r#"{{"text":{},"start_t":{},"end_t":{}}}"#,
-            serde_json::to_string(&self.text).expect("a string is always JSON"),
+            r#"{{"start_t":{},"text":{}}}"#,
             time(self.start_t),
-            time(self.end_t)
+            serde_json::to_string(&self.text).expect("a string is always JSON")
         )
     }
 }
@@ -75,6 +69,16 @@ fn time(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+/// Each payload one frame shows, once, whatever order the decoder met them
+/// in: sorted, so two decoders reading the same frame name them alike.
+pub fn payloads(codes: &[Found]) -> Vec<&str> {
+    let mut texts: Vec<&str> = codes.iter().map(|code| code.text.as_str()).collect();
+    // UTF-16 order, which is how JavaScript sorts strings.
+    texts.sort_unstable_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+    texts.dedup();
+    texts
 }
 
 /// One rgba pixel's luma, by the BT.709 weights, rounded to the byte the
@@ -274,200 +278,5 @@ impl DetectionCache {
             }
         };
         &self.entries[at].1
-    }
-}
-
-/// What one window saw: each payload against the time of the LAST frame in
-/// the window it was really seen in, in the order the window met them.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Sightings(Vec<(String, f64)>);
-
-impl Sightings {
-    pub fn new() -> Self {
-        Sightings(Vec::new())
-    }
-
-    /// Keeps the later of this sighting and any already held for the payload.
-    pub fn note(&mut self, text: &str, time: f64) {
-        match self.0.iter_mut().find(|(held, _)| held == text) {
-            Some((_, held)) => {
-                if time > *held {
-                    *held = time;
-                }
-            }
-            None => self.0.push((text.to_string(), time)),
-        }
-    }
-
-    pub fn get(&self, text: &str) -> Option<f64> {
-        self.0
-            .iter()
-            .find(|(held, _)| held == text)
-            .map(|(_, time)| *time)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&str, f64)> {
-        self.0.iter().map(|(text, time)| (text.as_str(), *time))
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl FromIterator<(String, f64)> for Sightings {
-    fn from_iter<I: IntoIterator<Item = (String, f64)>>(items: I) -> Self {
-        let mut sightings = Sightings::new();
-        for (text, time) in items {
-            sightings.note(&text, time);
-        }
-        sightings
-    }
-}
-
-/// One payload's unbroken stretch of credited frames.
-struct Run {
-    start_time: f64,
-    last_time: f64,
-    /// Frames credited since the last one this code was seen in.
-    missed: u32,
-    /// The interval in force at the first of those - the frame the run ends
-    /// on, which is not the frame its cue comes out on.
-    closing_interval: f64,
-}
-
-/// The runs a code makes across the frames it is credited to.
-///
-/// A code is credited back over the WINDOW frames before the one it was read
-/// in, so a code the decoder only catches late still covers the frames before
-/// it and the flicker a per-frame decoder produces closes up. That reach back
-/// is arithmetic: the timestamps of those frames are held as they pass, and
-/// their pixels are never asked for.
-///
-/// A run is the stretch of frames credited with one payload without a break,
-/// which heals any gap the window can span, and it closes into one cue: the
-/// first frame credited, through the last frame the code was really seen in.
-/// A run ENDS on the frame after its last sighting; nothing ahead being known,
-/// that is only certain a window later, which is when its cue comes out.
-pub struct CodeRuns {
-    runs: Vec<(String, Run)>,
-    interval: f64,
-    previous_time: Option<f64>,
-    /// The times of the last WINDOW frames, this one last. The first of them
-    /// is where a run starting now reaches back to.
-    recent: VecDeque<f64>,
-}
-
-impl Default for CodeRuns {
-    fn default() -> Self {
-        CodeRuns::new()
-    }
-}
-
-impl CodeRuns {
-    pub fn new() -> Self {
-        CodeRuns {
-            runs: Vec::new(),
-            interval: ASSUMED_INTERVAL,
-            previous_time: None,
-            recent: VecDeque::new(),
-        }
-    }
-
-    /// One frame's credit. Returns the cues of the runs now known to have
-    /// ended - each a window ago, since that is how long it takes to be sure.
-    pub fn credit(&mut self, time: f64, sightings: &Sightings) -> Vec<Cue> {
-        if let Some(previous) = self.previous_time {
-            if time > previous {
-                self.interval = time - previous;
-            }
-        }
-        self.previous_time = Some(time);
-
-        self.recent.push_back(time);
-        while self.recent.len() > WINDOW as usize {
-            self.recent.pop_front();
-        }
-        let reaches_back_to = *self.recent.front().expect("this frame is in it");
-
-        for (text, last_seen) in sightings.iter() {
-            match self.runs.iter_mut().find(|(held, _)| held == text) {
-                Some((_, run)) => {
-                    run.last_time = run.last_time.max(last_seen);
-                    run.missed = 0;
-                }
-                None => self.runs.push((
-                    text.to_string(),
-                    Run {
-                        start_time: reaches_back_to,
-                        last_time: last_seen,
-                        missed: 0,
-                        closing_interval: self.interval,
-                    },
-                )),
-            }
-        }
-
-        let interval = self.interval;
-        let mut cues = Vec::new();
-        self.runs.retain_mut(|(text, run)| {
-            if sightings.get(text).is_some() {
-                return true;
-            }
-            if run.missed == 0 {
-                run.closing_interval = interval;
-            }
-            run.missed += 1;
-            if run.missed < WINDOW {
-                return true;
-            }
-            cues.push(cue(text, run));
-            false
-        });
-        cues
-    }
-
-    /// The cues of every run the stream ended before, which then close. A run
-    /// the window had not finished missing ended before the stream did, so it
-    /// comes out ahead of the ones still on screen at the end.
-    pub fn flush(&mut self) -> Vec<Cue> {
-        let interval = self.interval;
-        let mut held: Vec<(String, Run)> = std::mem::take(&mut self.runs);
-        for (_, run) in &mut held {
-            if run.missed == 0 {
-                run.closing_interval = interval;
-            }
-        }
-        held.sort_by(|(_, a), (_, b)| ends_at(a).total_cmp(&ends_at(b)));
-        held.iter().map(|(text, run)| cue(text, run)).collect()
-    }
-}
-
-// When a run ended, for the order the cues come out in. A run still on screen
-// ends with the stream, after every run that ran out before it.
-fn ends_at(run: &Run) -> f64 {
-    if run.missed == 0 {
-        f64::INFINITY
-    } else {
-        run.last_time
-    }
-}
-
-// A run as one cue. A code caught in a single frame would span nothing, so
-// such a cue is given one frame's width.
-fn cue(text: &str, run: &Run) -> Cue {
-    let end = if run.last_time > run.start_time {
-        run.last_time
-    } else {
-        run.start_time + run.closing_interval
-    };
-    Cue {
-        text: text.to_string(),
-        start_t: run.start_time,
-        end_t: end,
     }
 }

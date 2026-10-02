@@ -1,12 +1,12 @@
 {
   "name": "ffrwd/rsqr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "QR codes found in video and turned into a caption track or mosaiced out of the picture, hosted in wasm - and written in Rust, rqrr compiled to a wasip2 component.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/imbcmdth/ffrwd-package-rsqr",
   "capabilities": [],
   "dependencies": {
-    "ffrwd/wasm": "0.11.0"
+    "ffrwd/wasm": "0.19.0"
   },
   "keywords": [
     "qr",

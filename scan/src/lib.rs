@@ -1,126 +1,201 @@
-//! `scan`: the picture untouched, every QR code beside it as a cue row.
+//! `scan`: a row per frame for each QR code in view, every row of one
+//! sighting naming it by the time it began.
 
-// The 0.10.0 world, checked in beside the crate: this module reads one frame
-// per call and gains nothing from the borrowed window, while the installed
-// `ffrwd/wasm` package carries only the version the manifest names.
-wit_bindgen::generate!({
-    path: "wit-0.10.0",
-    world: "window-module",
-});
+use ffrwd_node::{Bound, Init, Input, NoParams, Node, Out, Output, Result, Shape, Spans, Tick};
+use rsqr_core::{detect_codes, payloads, Sighting, GAP, PIXEL_FORMAT};
 
-use std::cell::RefCell;
+const ROW_SCHEMA: &str = r#"{"type":"object","properties":{"start_t":{"type":"number"},"text":{"type":"string"}},"required":["start_t","text"],"additionalProperties":false}"#;
 
-use exports::ffrwd::av::window_filter::{
-    Format, FramePayload, Guest, InFrame, Meta, OutFrame, Processed, StreamInfo, WindowMeta,
-};
-use rsqr_core::{
-    heads, Cue, Instance, WindowFrame, PARAMS_SCHEMA, PIXEL_FORMAT, SCAN_WINDOW, STRIDE,
-};
-
-const NAME: &str = "scan";
-const VERSION: &str = "0.1.0";
-
-const ROWS_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"},"start_t":{"type":"number"},"end_t":{"type":"number"}},"required":["text","start_t","end_t"],"additionalProperties":false}"#;
-
-thread_local! {
-    static INSTANCE: RefCell<Instance> = RefCell::new(Instance::new(NAME));
+struct Scan {
+    v: u32,
+    width: usize,
+    height: usize,
+    sightings: Spans<String>,
 }
 
-struct Scan;
+impl Node for Scan {
+    const NAME: &'static str = "scan";
+    const VERSION: &'static str = "0.2.0";
+    type Params = NoParams;
 
-impl Guest for Scan {
-    fn describe() -> WindowMeta {
-        WindowMeta {
-            meta: Meta {
-                name: NAME.to_string(),
-                version: VERSION.to_string(),
-                params_schema: PARAMS_SCHEMA.to_string(),
-                rows_schema: ROWS_SCHEMA.to_string(),
-                pixel_formats: vec![PIXEL_FORMAT.to_string()],
-                sample_formats: vec![],
-                sample_rates: vec![],
-                channel_counts: vec![],
-                // The cues mint an untagged track: the language a call could
-                // name is not declared here yet.
-                rows_language: vec![],
-            },
-            window: SCAN_WINDOW,
-            stride: STRIDE,
-            // A run outlives the call it started in, so a call answers out of
-            // what earlier calls left behind.
-            pure: false,
-            // One output per frame consumed, each at that frame's own pts.
-            one_to_one: true,
-            reads_rows: false,
-            forwards_rows: false,
-            inputs: 1,
-        }
+    fn shape(_: &NoParams, _: &Bound) -> Result<Shape> {
+        Ok(Shape::new()
+            .input(Input::video("v").clock().pixel_formats(&[PIXEL_FORMAT]))
+            .output(Output::rows("codes").schema_json(ROW_SCHEMA)))
     }
 
-    fn init(format: Format, stream_info: StreamInfo, params: String) -> Result<(), String> {
-        INSTANCE.with_borrow_mut(|instance| {
-            let Format::Video(video) = format else {
-                return Err(instance.not_video());
-            };
-            instance.open(
-                video.width,
-                video.height,
-                &video.pix_fmt,
-                (stream_info.time_base.num, stream_info.time_base.den),
-                &params,
-            )
+    fn init(_: NoParams, init: &Init) -> Result<Scan> {
+        let v = init.stream("v")?;
+        let video = v.video_format().ok_or("`v` is a video input")?;
+        Ok(Scan {
+            v: v.id,
+            width: video.width as usize,
+            height: video.height as usize,
+            sightings: Spans::new().gap(GAP as u64),
         })
     }
 
-    fn set_params(params: String) -> Result<(), String> {
-        INSTANCE.with_borrow(|instance| instance.read_params(&params))
+    fn process(&mut self, tick: &Tick, out: &mut Out) -> Result<()> {
+        let Some(frame) = tick.frame(self.v) else {
+            return Ok(());
+        };
+        self.sightings.tick(tick.time_base().seconds(frame.pts));
+        let pixels = tick.fetch(self.v, frame.index);
+        for text in payloads(&detect_codes(&pixels, self.width, self.height)) {
+            let row = Sighting {
+                start_t: self.sightings.see(text.to_owned()).start_t,
+                text: text.to_owned(),
+            };
+            out.message("codes", frame.pts, row.row().into_bytes())?;
+        }
+        Ok(())
     }
+}
 
-    fn process(frames: Vec<InFrame>, _trailing: Vec<String>, last: bool) -> Processed {
-        INSTANCE.with_borrow_mut(|instance| {
-            let mut out: Vec<OutFrame> = Vec::new();
-            for head in heads(frames.len(), last) {
-                // Only the frame the call speaks for is read. The frames a
-                // sighting is carried back over are reached by their
-                // timestamps, so their pixels are never asked for.
-                let window = [WindowFrame {
-                    pts: frames[head].pts,
-                    frame: &frames[head].frame,
-                }];
-                let seen = instance.read(&window);
-                let time = instance.seconds(frames[head].pts);
-                let cues = instance.runs.credit(time, &seen.sightings);
-                out.push(OutFrame {
-                    pts: frames[head].pts,
-                    // The picture leaves as it arrived; the host copies nothing.
-                    frame: FramePayload::Same,
-                    rows: cues.iter().map(Cue::row).collect(),
-                });
-            }
-            if !last {
-                return Processed {
-                    frames: out,
-                    trailing: vec![],
-                };
-            }
+ffrwd_node::export!(Scan);
 
-            // Every frame has left, so a code still on screen closes here.
-            let closing: Vec<String> = instance.runs.flush().iter().map(Cue::row).collect();
-            match out.last_mut() {
-                Some(final_frame) => {
-                    final_frame.rows.extend(closing);
-                    Processed {
-                        frames: out,
-                        trailing: vec![],
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ffrwd_node::mock::Harness;
+    use ffrwd_node::{BoundStream, Rational};
+    use qrcode::{Color, EcLevel, QrCode};
+    use rsqr_core::CHANNELS;
+
+    const WIDTH: usize = 240;
+    const HEIGHT: usize = 120;
+    const FPS: i64 = 30;
+
+    // Codes painted dark on white at `at`, each `scale` pixels a module, with
+    // the quiet zone a decoder needs around it.
+    fn frame(codes: &[(&str, usize, usize, usize)]) -> Vec<u8> {
+        let mut rgba = vec![255u8; WIDTH * HEIGHT * CHANNELS];
+        for &(text, scale, left, top) in codes {
+            let code = QrCode::with_error_correction_level(text, EcLevel::M).unwrap();
+            let modules = code.width();
+            for (at, color) in code.to_colors().into_iter().enumerate() {
+                if color != Color::Dark {
+                    continue;
+                }
+                let (x0, y0) = (
+                    left + (at % modules + 4) * scale,
+                    top + (at / modules + 4) * scale,
+                );
+                for y in y0..y0 + scale {
+                    let row = (y * WIDTH + x0) * CHANNELS;
+                    rgba[row..row + scale * CHANNELS].fill(0);
+                    for x in 0..scale {
+                        rgba[row + x * CHANNELS + 3] = 255;
                     }
                 }
-                None => Processed {
-                    frames: out,
-                    trailing: closing,
-                },
             }
-        })
+        }
+        rgba
+    }
+
+    fn harness() -> Harness<Scan> {
+        let v = BoundStream::video(
+            "v",
+            0,
+            WIDTH as u32,
+            HEIGHT as u32,
+            "rgba",
+            Rational::new(1, FPS as i32),
+        );
+        Harness::new("", vec![v]).unwrap()
+    }
+
+    /// Every row `scan` writes over `count` frames, as (frame, row). `seen(k)`
+    /// names the codes painted on frame k.
+    fn run(
+        count: i64,
+        seen: impl Fn(i64) -> Vec<(&'static str, usize, usize, usize)>,
+    ) -> Vec<(i64, String)> {
+        let mut scan = harness();
+        let mut rows = Vec::new();
+        for k in 0..count {
+            let mut tick = scan.tick(k).frame(0, k, frame(&seen(k)));
+            if k == count - 1 {
+                tick = tick.last();
+            }
+            rows.extend(scan.process(&tick).unwrap().messages("codes"));
+        }
+        rows
+    }
+
+    fn row(start: i64, text: &str) -> String {
+        Sighting {
+            start_t: start as f64 / FPS as f64,
+            text: text.to_owned(),
+        }
+        .row()
+    }
+
+    const A: (&str, usize, usize, usize) = ("ffrwd", 3, 0, 0);
+    const B: (&str, usize, usize, usize) = ("https://want.video", 2, 120, 0);
+
+    #[test]
+    fn rows_alone_leave_on_codes_and_the_picture_does_not() {
+        let scan = harness();
+        let shape = scan.shape();
+        assert_eq!(shape.outputs.len(), 1);
+        assert_eq!(shape.outputs[0].name, "codes");
+        assert!(
+            !shape.pure,
+            "which sighting a code belongs to outlives the frame"
+        );
+        assert_eq!(shape.find_input("v").unwrap().window, 1);
+    }
+
+    #[test]
+    fn a_code_in_view_writes_a_row_on_every_frame_named_by_its_first() {
+        let rows = run(8, |k| if (2..6).contains(&k) { vec![A] } else { vec![] });
+        let frames: Vec<i64> = rows.iter().map(|(pts, _)| *pts).collect();
+        assert_eq!(frames, vec![2, 3, 4, 5]);
+        assert!(rows.iter().all(|(_, text)| *text == row(2, "ffrwd")));
+    }
+
+    #[test]
+    fn a_gap_of_fourteen_frames_is_still_the_same_sighting() {
+        let rows = run(40, |k| if k == 5 || k == 20 { vec![A] } else { vec![] });
+        assert_eq!(rows, vec![(5, row(5, "ffrwd")), (20, row(5, "ffrwd"))]);
+    }
+
+    #[test]
+    fn a_gap_of_fifteen_frames_starts_a_new_sighting() {
+        let rows = run(40, |k| if k == 5 || k == 21 { vec![A] } else { vec![] });
+        assert_eq!(rows, vec![(5, row(5, "ffrwd")), (21, row(21, "ffrwd"))]);
+    }
+
+    #[test]
+    fn two_codes_in_view_are_two_sightings_and_their_rows_are_sorted() {
+        let rows = run(6, |k| match k {
+            1 => vec![B],
+            2..=3 => vec![B, A],
+            _ => vec![],
+        });
+        assert_eq!(
+            rows,
+            vec![
+                (1, row(1, "https://want.video")),
+                (2, row(2, "ffrwd")),
+                (2, row(1, "https://want.video")),
+                (3, row(2, "ffrwd")),
+                (3, row(1, "https://want.video")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_last_frame_writes_its_rows_like_any_other() {
+        let rows = run(3, |k| if k == 2 { vec![A] } else { vec![] });
+        assert_eq!(rows, vec![(2, row(2, "ffrwd"))]);
+    }
+
+    #[test]
+    fn a_last_call_with_no_frame_writes_nothing() {
+        let mut scan = harness();
+        let emitted = scan.process(&scan.tick(0).last()).unwrap();
+        assert!(emitted.messages("codes").is_empty());
     }
 }
-
-export!(Scan);

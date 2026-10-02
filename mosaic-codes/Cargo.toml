@@ -1,6 +1,6 @@
 [package]
 name = "mosaic-codes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -8,5 +8,8 @@ name = "mosaic_codes"
 crate-type = ["cdylib"]
 
 [dependencies]
+ffrwd-node = { git = "https://github.com/imbcmdth/ffrwd-node", tag = "v0.1.0" }
 rsqr-core = { path = "../core" }
-wit-bindgen = "0.57.1"
+
+[dev-dependencies]
+qrcode = { version = "0.14.1", default-features = false }

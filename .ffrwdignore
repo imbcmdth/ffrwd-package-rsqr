@@ -3,8 +3,5 @@
 # the directory stays out of the archive.
 target/
 
-# The wit each crate's build.rs copies in, which is the sidecar's own.
-wit/
-
 # Local development state, not package content.
 ffrwd.lock
